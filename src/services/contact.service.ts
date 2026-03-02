@@ -22,7 +22,8 @@ export const identifyContact = async (
         // 1 Find direct matches
         const matchedContacts = await findContactsByEmailOrPhone(
             email,
-            phoneNumber
+            phoneNumber,
+            tx
         );
 
         // 2 If none exist → create new primary
@@ -53,7 +54,8 @@ export const identifyContact = async (
 
         // 4 Fetch full cluster
         const allContacts = await findContactsByPrimaryIds(
-            Array.from(primaryIds)
+            Array.from(primaryIds),
+            tx
         );
 
         // 5 Determine oldest primary
@@ -87,8 +89,8 @@ export const identifyContact = async (
 
         // 7 Refetch cluster after potential merge
         const updatedCluster = await findContactsByPrimaryIds([
-            oldestPrimary.id,
-        ]);
+            oldestPrimary.id
+        ], tx);
 
         // 8 Check if incoming data is new
         const emails = new Set(updatedCluster.map((c) => c.email).filter(Boolean));
@@ -114,7 +116,7 @@ export const identifyContact = async (
         // 9 Final cluster
         const finalCluster = await findContactsByPrimaryIds([
             oldestPrimary.id,
-        ]);
+        ], tx);
 
         return buildResponse(finalCluster);
     });

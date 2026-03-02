@@ -7,6 +7,7 @@ import { LinkPrecedence, Prisma, Contact } from "@prisma/client";
 export const findContactsByEmailOrPhone = async (
   email?: string,
   phoneNumber?: string,
+  tx?: Prisma.TransactionClient
 ): Promise<Contact[]> => {
   return prisma.contact.findMany({
     where: {
