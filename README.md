@@ -16,9 +16,9 @@ Example: POST https://identity-reconciliation-epws.onrender.com/identify
 }
 ```
 
-At least one of email or phone number must be provided.
-Content type must be `Application/json`
-`form-data` is not supported.
+-At least one of email or phone number must be provided.
+-Content type must be `Application/json`
+-`form-data` is not supported.
 
 ## Response Format:
 ```
@@ -32,12 +32,12 @@ Content type must be `Application/json`
 }
 ```
 ## Tech Stack Used:
-Node.js
-TypeScript
-Express
-PostgreSQL
-Prisma ORM
-Render
+-Node.js
+-TypeScript
+-Express
+-PostgreSQL
+-Prisma ORM
+-Render
 
 ## Author:
 Soham Shah
