@@ -4,17 +4,19 @@ import { LinkPrecedence, Prisma, Contact } from "@prisma/client";
 /**
  * Find contacts that match given email OR phoneNumber
  */
-export const findContactsByEmailOrPhone = async (
-  email?: string,
-  phoneNumber?: string,
+export const findContactsByEmailsOrPhones = async (
+  emails: string[],
+  phones: string[],
   tx?: Prisma.TransactionClient
 ): Promise<Contact[]> => {
-  return prisma.contact.findMany({
+  const db = tx ?? prisma;
+
+  return db.contact.findMany({
     where: {
       deletedAt: null,
       OR: [
-        email ? { email } : undefined,
-        phoneNumber ? { phoneNumber } : undefined,
+        emails.length ? { email: { in: emails } } : undefined,
+        phones.length ? { phoneNumber: { in: phones } } : undefined,
       ].filter(Boolean) as Prisma.ContactWhereInput[],
     },
   });
@@ -24,7 +26,8 @@ export const findContactsByEmailOrPhone = async (
  * Find full contact cluster given primary IDs
  */
 export const findContactsByPrimaryIds = async (
-  primaryIds: number[]
+  primaryIds: number[],
+  tx?: Prisma.TransactionClient
 ): Promise<Contact[]> => {
   return prisma.contact.findMany({
     where: {

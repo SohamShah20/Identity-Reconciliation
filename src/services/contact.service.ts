@@ -1,155 +1,187 @@
-import { LinkPrecedence, Contact } from "@prisma/client";
+import { Contact, LinkPrecedence } from "@prisma/client";
 import {
-    findContactsByEmailOrPhone,
-    findContactsByPrimaryIds,
-    createContact,
-    updateContact,
-    runInTransaction,
+  findContactsByEmailsOrPhones,
+  createContact,
+  updateContact,
+  runInTransaction,
 } from "../repositories/contact.repository";
 
 /**
- * Main identity resolution function
+ * Graph-based identity resolution
  */
 export const identifyContact = async (
-    email?: string,
-    phoneNumber?: string
+  email?: string,
+  phoneNumber?: string
 ) => {
-    if (!email && !phoneNumber) {
-        throw new Error("Either email or phoneNumber must be provided");
+  if (!email && !phoneNumber) {
+    throw new Error("Either email or phoneNumber must be provided");
+  }
+
+  return runInTransaction(async (tx) => {
+    // -----------------------------
+    // Graph Expansion
+    // -----------------------------
+
+    const emailSet = new Set<string>();
+    const phoneSet = new Set<string>();
+    const visited = new Map<number, Contact>();
+
+    if (email) emailSet.add(email);
+    if (phoneNumber) phoneSet.add(phoneNumber);
+
+    let expansion = true;
+
+    while (expansion) {
+      expansion = false;
+
+      const found = await findContactsByEmailsOrPhones(
+        Array.from(emailSet),
+        Array.from(phoneSet),
+        tx
+      );
+
+      for (const contact of found) {
+        if (!visited.has(contact.id)) {
+          visited.set(contact.id, contact);
+          expansion = true;
+
+          if (contact.email) emailSet.add(contact.email);
+          if (contact.phoneNumber) phoneSet.add(contact.phoneNumber);
+        }
+      }
     }
 
-    return runInTransaction(async (tx) => {
-        // 1 Find direct matches
-        const matchedContacts = await findContactsByEmailOrPhone(
-            email,
-            phoneNumber,
+    const allContacts = Array.from(visited.values());
+
+    // -----------------------------
+    // If no existing contacts
+    // -----------------------------
+    if (allContacts.length === 0) {
+      const createData: any = {
+        linkPrecedence: LinkPrecedence.primary,
+        linkedId: null,
+      };
+
+      if (email) createData.email = email;
+      if (phoneNumber) createData.phoneNumber = phoneNumber;
+
+      const newPrimary = await createContact(createData, tx);
+
+      return buildResponse([newPrimary]);
+    }
+
+    // -----------------------------
+    // Determine Oldest Primary
+    // -----------------------------
+    const primaries = allContacts.filter(
+      (c) => c.linkPrecedence === "primary"
+    );
+
+    // If none marked primary (edge case), treat all as candidates
+    const candidates = primaries.length ? primaries : allContacts;
+
+    candidates.sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
+    );
+
+    const [oldestPrimary] = candidates;
+
+    if (!oldestPrimary) {
+      throw new Error("Invariant violation: No primary contact found");
+    }
+
+    // -----------------------------
+    // Rewire Entire Cluster
+    // -----------------------------
+    for (const contact of allContacts) {
+      if (contact.id !== oldestPrimary.id) {
+        if (
+          contact.linkPrecedence !== "secondary" ||
+          contact.linkedId !== oldestPrimary.id
+        ) {
+          await updateContact(
+            contact.id,
+            {
+              linkPrecedence: LinkPrecedence.secondary,
+              linkedId: oldestPrimary.id,
+            },
             tx
-        );
-
-        // 2 If none exist → create new primary
-        if (matchedContacts.length === 0) {
-            const createData: any = {
-                linkPrecedence: LinkPrecedence.primary,
-                linkedId: null,
-            };
-
-            if (email) createData.email = email;
-            if (phoneNumber) createData.phoneNumber = phoneNumber;
-
-            const newPrimary = await createContact(createData, tx);
-
-            return buildResponse([newPrimary]);
+          );
         }
+      }
+    }
 
-        // 3 Get all related primary IDs
-        const primaryIds = new Set<number>();
+    // -----------------------------
+    // Add New Info If Needed
+    // -----------------------------
+    const existingEmails = new Set(
+      allContacts.map((c) => c.email).filter(Boolean) as string[]
+    );
 
-        for (const contact of matchedContacts) {
-            if (contact.linkPrecedence === "primary") {
-                primaryIds.add(contact.id);
-            } else if (contact.linkedId) {
-                primaryIds.add(contact.linkedId);
-            }
-        }
+    const existingPhones = new Set(
+      allContacts.map((c) => c.phoneNumber).filter(Boolean) as string[]
+    );
 
-        // 4 Fetch full cluster
-        const allContacts = await findContactsByPrimaryIds(
-            Array.from(primaryIds),
-            tx
-        );
+    const isNewEmail = email && !existingEmails.has(email);
+    const isNewPhone = phoneNumber && !existingPhones.has(phoneNumber);
 
-        // 5 Determine oldest primary
-        const primaries = allContacts.filter(
-            (c) => c.linkPrecedence === "primary"
-        );
+    if (isNewEmail || isNewPhone) {
+      const secondaryData: any = {
+        linkPrecedence: LinkPrecedence.secondary,
+        linkedId: oldestPrimary.id,
+      };
 
-        primaries.sort(
-            (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
-        );
+      if (email) secondaryData.email = email;
+      if (phoneNumber) secondaryData.phoneNumber = phoneNumber;
 
-        const [oldestPrimary] = primaries;
+      await createContact(secondaryData, tx);
+    }
 
-        if (!oldestPrimary) {
-            throw new Error("Invariant violation: No primary contact found");
-        }
+    // -----------------------------
+    // Final Cluster Fetch
+    // -----------------------------
+    const finalCluster = await findContactsByEmailsOrPhones(
+      Array.from(emailSet),
+      Array.from(phoneSet),
+      tx
+    );
 
-        // 6 Merge other primaries into oldest
-        for (const primary of primaries) {
-            if (primary.id !== oldestPrimary.id) {
-                await updateContact(
-                    primary.id,
-                    {
-                        linkedId: oldestPrimary.id,
-                        linkPrecedence: LinkPrecedence.secondary,
-                    },
-                    tx
-                );
-            }
-        }
-
-        // 7 Refetch cluster after potential merge
-        const updatedCluster = await findContactsByPrimaryIds([
-            oldestPrimary.id
-        ], tx);
-
-        // 8 Check if incoming data is new
-        const emails = new Set(updatedCluster.map((c) => c.email).filter(Boolean));
-        const phones = new Set(
-            updatedCluster.map((c) => c.phoneNumber).filter(Boolean)
-        );
-
-        const isNewEmail = email && !emails.has(email);
-        const isNewPhone = phoneNumber && !phones.has(phoneNumber);
-
-        if (isNewEmail || isNewPhone) {
-            const secondaryData: any = {
-                linkPrecedence: LinkPrecedence.secondary,
-                linkedId: oldestPrimary.id,
-            };
-
-            if (email) secondaryData.email = email;
-            if (phoneNumber) secondaryData.phoneNumber = phoneNumber;
-
-            await createContact(secondaryData, tx);
-        }
-
-        // 9 Final cluster
-        const finalCluster = await findContactsByPrimaryIds([
-            oldestPrimary.id,
-        ], tx);
-
-        return buildResponse(finalCluster);
-    });
+    return buildResponse(finalCluster);
+  });
 };
 
 /**
- * Build response payload
+ * Build API response
  */
 const buildResponse = (contacts: Contact[]) => {
-    const primary = contacts.find(
-        (c) => c.linkPrecedence === "primary"
-    )!;
+  const primary = contacts.find(
+    (c) => c.linkPrecedence === "primary"
+  );
 
-    const secondaryContacts = contacts.filter(
-        (c) => c.linkPrecedence === "secondary"
-    );
+  if (!primary) {
+    throw new Error("Invariant violation: No primary in final cluster");
+  }
 
-    const emails = [
-        primary.email,
-        ...secondaryContacts.map((c) => c.email),
-    ].filter((v, i, arr) => v && arr.indexOf(v) === i) as string[];
+  const secondaries = contacts.filter(
+    (c) => c.linkPrecedence === "secondary"
+  );
 
-    const phoneNumbers = [
-        primary.phoneNumber,
-        ...secondaryContacts.map((c) => c.phoneNumber),
-    ].filter((v, i, arr) => v && arr.indexOf(v) === i) as string[];
+  const emails = [
+    primary.email,
+    ...secondaries.map((c) => c.email),
+  ].filter((v, i, arr) => v && arr.indexOf(v) === i) as string[];
 
-    return {
-        contact: {
-            primaryContactId: primary.id,
-            emails,
-            phoneNumbers,
-            secondaryContactIds: secondaryContacts.map((c) => c.id),
-        },
-    };
+  const phoneNumbers = [
+    primary.phoneNumber,
+    ...secondaries.map((c) => c.phoneNumber),
+  ].filter((v, i, arr) => v && arr.indexOf(v) === i) as string[];
+
+  return {
+    contact: {
+      primaryContactId: primary.id,
+      emails,
+      phoneNumbers,
+      secondaryContactIds: secondaries.map((c) => c.id),
+    },
+  };
 };
