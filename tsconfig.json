@@ -45,5 +45,7 @@
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "lib": ["ES2020"]
-  }
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
 }
